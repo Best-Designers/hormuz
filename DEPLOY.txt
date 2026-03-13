@@ -1,0 +1,60 @@
+HORMUZ INTEL DASHBOARD — DEPLOYMENT GUIDE
+==========================================
+
+REQUIREMENTS:
+  - Node.js 18+ (https://nodejs.org)
+  - A server with port 3000 open (or set PORT env variable)
+
+QUICK START (3 steps):
+  1. Upload entire "hormuz-deploy" folder to your server
+  2. Run:  npm install
+  3. Run:  npm start
+
+That's it. Dashboard is live at http://your-server:3000
+
+TO CHANGE THE PORT:
+  PORT=8080 npm start
+
+TO RUN IN BACKGROUND (stays running after you disconnect):
+  nohup npm start > hormuz.log 2>&1 &
+
+  Or use PM2 (recommended for production):
+  npm install -g pm2
+  pm2 start server.js --name hormuz-intel
+  pm2 save
+  pm2 startup    (auto-start on reboot)
+
+WHAT THE SERVER DOES:
+  - Serves the dashboard at / (the index.html in /public)
+  - Provides /api/proxy?url=... endpoint that fetches data server-side
+  - This ELIMINATES all CORS issues with Yahoo Finance, StockLabs, etc.
+  - The dashboard auto-detects the server proxy and uses it
+
+FILE STRUCTURE:
+  hormuz-deploy/
+    server.js        - Node.js Express server with CORS proxy
+    package.json     - Dependencies (just Express)
+    DEPLOY.txt       - This file
+    public/
+      index.html     - The dashboard (single file, everything included)
+
+CUSTOM DOMAIN / HTTPS:
+  Use nginx or Cloudflare as a reverse proxy in front of this server.
+  Example nginx config:
+
+  server {
+      listen 80;
+      server_name yourdomain.com;
+      location / {
+          proxy_pass http://localhost:3000;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection 'upgrade';
+          proxy_set_header Host $host;
+          proxy_cache_bypass $http_upgrade;
+      }
+  }
+
+PASSWORD:
+  The dashboard password gate is in the HTML file.
+  Search for "TEAM_PASSWORD" in public/index.html to change it.
