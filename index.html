@@ -1718,48 +1718,96 @@ function filterFeed(filter, btn) {
 try { renderFeed('all'); } catch(e) { console.warn('renderFeed init error:', e.message); }
 
 // =====================
-// TRANSIT LOG
+// TRANSIT LOG (derived from live news feeds)
 // =====================
-// Generate transit data relative to current date
-function generateTransits() {
-  const vessels = [
-    { vessel: 'SABITI', type: 'VLCC', flag: 'Iran', flagClass: 'flag-iran' },
-    { vessel: 'SHANDONG SPIRIT', type: 'Suezmax', flag: 'China', flagClass: 'flag-china' },
-    { vessel: 'DENA', type: 'VLCC', flag: 'Iran', flagClass: 'flag-iran' },
-    { vessel: 'PACIFIC VOYAGER', type: 'Aframax', flag: 'Liberia', flagClass: 'flag-other' },
-    { vessel: 'DALIAN STAR', type: 'VLCC', flag: 'China', flagClass: 'flag-china' },
-    { vessel: 'FORTUNE', type: 'Aframax', flag: 'Iran', flagClass: 'flag-iran' },
-    { vessel: 'MARE ATLANTIC', type: 'Suezmax', flag: 'Malta', flagClass: 'flag-other' },
-    { vessel: 'ADRIAN DARYA', type: 'VLCC', flag: 'Iran', flagClass: 'flag-iran' },
-    { vessel: 'NORDIC FREEDOM', type: 'Aframax', flag: 'Norway', flagClass: 'flag-other' },
-    { vessel: 'ZHONGSHAN', type: 'VLCC', flag: 'China', flagClass: 'flag-china' },
-  ];
-  const dirs = ['Eastbound', 'Westbound'];
-  const statuses = ['PASSED', 'PASSED', 'PASSED', 'PASSED', 'PASSED', 'PASSED', 'TURNED BACK', 'DIVERTED'];
-  const now = new Date();
-  return vessels.map((v, i) => {
-    const t = new Date(now.getTime() - i * 3.5 * 3600000 - Math.random() * 1800000);
-    const pad = n => String(n).padStart(2, '0');
-    const timeStr = `${t.getUTCFullYear()}-${pad(t.getUTCMonth()+1)}-${pad(t.getUTCDate())} ${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}`;
-    return { time: timeStr, ...v, dir: dirs[i % 2], status: statuses[i % statuses.length] };
-  });
-}
-const transits = generateTransits();
+var transitAttemptHistory = [];
 
-try {
-  document.getElementById('transit-log').innerHTML = transits.map(t => {
-    const statusColor = t.status === 'PASSED' ? 'var(--accent-green)' :
-                         t.status === 'TURNED BACK' ? 'var(--accent-red)' : 'var(--accent-orange)';
-    return `<tr>
-      <td>${t.time}</td>
-      <td style="color: var(--text-primary); font-weight: 600;">${t.vessel}</td>
-      <td>${t.type}</td>
-      <td><span class="flag-tag ${t.flagClass}">${t.flag}</span></td>
-      <td>${t.dir}</td>
-      <td style="color: ${statusColor}; font-weight: 700;">${t.status}</td>
-    </tr>`;
+function toUtcString(tsSec) {
+  var d = new Date((tsSec || Math.floor(Date.now() / 1000)) * 1000);
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+}
+
+function deriveTransitAttempt(item) {
+  var text = ((item && item.title) || '').trim();
+  if (!text) return null;
+  var lower = text.toLowerCase();
+  var isTransitHeadline = /(hormuz|strait).*(transit|vessel|ship|tanker)|\b(transit|tanker|vessel|ship)\b.*hormuz/.test(lower);
+  if (!isTransitHeadline) return null;
+
+  var status = 'MONITORING';
+  if (/turned back|retreat|withdrew|aborted/.test(lower)) status = 'TURNED BACK';
+  else if (/divert|rerout/.test(lower)) status = 'DIVERTED';
+  else if (/seized|boarded|attacked|hit|damaged|explosion/.test(lower)) status = 'INCIDENT';
+  else if (/passed|completed transit|crossed|transited|cleared/.test(lower)) status = 'PASSED';
+
+  var direction = /eastbound/.test(lower) ? 'Eastbound' : /westbound/.test(lower) ? 'Westbound' : 'Unknown';
+  var vesselType = /\bvlcc\b/.test(lower) ? 'VLCC' : /\bsuezmax\b/.test(lower) ? 'Suezmax' : /\baframax\b/.test(lower) ? 'Aframax' : /\blng\b/.test(lower) ? 'LNG' : /container/.test(lower) ? 'Container' : /tanker/.test(lower) ? 'Tanker' : 'Commercial';
+  var vesselNameMatch = text.match(/"([^"]{3,40})"|\b([A-Z]{3,}(?:\s+[A-Z]{3,}){0,2})\b/);
+  var vessel = vesselNameMatch ? (vesselNameMatch[1] || vesselNameMatch[2]) : ((item.source || 'OSINT') + ' reported vessel');
+
+  var flag = 'Unknown';
+  var flagClass = 'flag-other';
+  if (/iran(ian)?/.test(lower)) { flag = 'Iran'; flagClass = 'flag-iran'; }
+  else if (/china|chinese/.test(lower)) { flag = 'China'; flagClass = 'flag-china'; }
+
+  return {
+    id: (text.substring(0, 80) + '|' + String(item.ts || 0)).toLowerCase(),
+    time: toUtcString(item.ts),
+    ts: item.ts || Math.floor(Date.now() / 1000),
+    vessel: vessel,
+    type: vesselType,
+    flag: flag,
+    flagClass: flagClass,
+    dir: direction,
+    status: status,
+  };
+}
+
+function mergeTransitAttempts(newsItems) {
+  if (!Array.isArray(newsItems) || newsItems.length === 0) return;
+  var next = newsItems.map(deriveTransitAttempt).filter(Boolean);
+  if (next.length === 0) return;
+
+  var byId = {};
+  transitAttemptHistory.concat(next).forEach(function(attempt) {
+    byId[attempt.id] = attempt;
+  });
+
+  var cutoffTs = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+  transitAttemptHistory = Object.values(byId)
+    .filter(function(a) { return a.ts >= cutoffTs; })
+    .sort(function(a, b) { return b.ts - a.ts; })
+    .slice(0, 300);
+
+  renderTransitLog();
+  updateTransitChartFromRealAttempts();
+}
+
+function renderTransitLog() {
+  var logEl = document.getElementById('transit-log');
+  if (!logEl) return;
+  var windowCutoff = Math.floor(Date.now() / 1000) - (72 * 60 * 60);
+  var rows = transitAttemptHistory.filter(function(t) { return t.ts >= windowCutoff; }).slice(0, 12);
+  if (rows.length === 0) {
+    logEl.innerHTML = '<tr><td colspan="6" style="padding: 14px; color: var(--text-muted);">No verified transit attempt headlines in last 72h yet. Feed updates automatically.</td></tr>';
+    return;
+  }
+  logEl.innerHTML = rows.map(function(t) {
+    var statusColor = t.status === 'PASSED' ? 'var(--accent-green)' :
+      t.status === 'TURNED BACK' || t.status === 'INCIDENT' ? 'var(--accent-red)' : 'var(--accent-orange)';
+    return '<tr>' +
+      '<td>' + t.time + '</td>' +
+      '<td style="color: var(--text-primary); font-weight: 600;">' + t.vessel + '</td>' +
+      '<td>' + t.type + '</td>' +
+      '<td><span class="flag-tag ' + t.flagClass + '">' + t.flag + '</span></td>' +
+      '<td>' + t.dir + '</td>' +
+      '<td style="color: ' + statusColor + '; font-weight: 700;">' + t.status + '</td>' +
+      '</tr>';
   }).join('');
-} catch(e) { console.warn('Transit log render error:', e.message); }
+}
+
+try { renderTransitLog(); } catch(e) { console.warn('Transit log render error:', e.message); }
 
 // =====================
 // OSINT SOURCES
@@ -1900,17 +1948,31 @@ for (let i = 0; i < 30; i++) {
   const d = new Date(baseDate);
   d.setDate(d.getDate() + i);
   transitDays.push((d.getMonth()+1) + '/' + d.getDate());
-  transitBaseline.push(85); // historical average
+  transitBaseline.push(8); // reference baseline for reported attempts/day
 
-  if (i < 16) {
-    transitCounts.push(Math.floor(70 + Math.random() * 30));
-  } else if (i < 20) {
-    transitCounts.push(Math.floor(40 - i * 1.5 + Math.random() * 15));
-  } else if (i < 24) {
-    transitCounts.push(Math.floor(10 + Math.random() * 8));
-  } else {
-    transitCounts.push(Math.floor(2 + Math.random() * 5));
-  }
+  transitCounts.push(0);
+}
+
+var transitChartRef = null;
+
+function updateTransitChartFromRealAttempts() {
+  if (!transitChartRef) return;
+  var dateCounts = {};
+  transitDays.forEach(function(label) { dateCounts[label] = 0; });
+
+  transitAttemptHistory.forEach(function(attempt) {
+    var d = new Date(attempt.ts * 1000);
+    var key = (d.getMonth() + 1) + '/' + d.getDate();
+    if (Object.prototype.hasOwnProperty.call(dateCounts, key)) {
+      dateCounts[key] += 1;
+    }
+  });
+
+  transitChartRef.data.datasets[0].data = transitDays.map(function(day) { return dateCounts[day] || 0; });
+  transitChartRef.data.datasets[0].backgroundColor = transitChartRef.data.datasets[0].data.map(function(v) {
+    return v >= 6 ? 'rgba(239,68,68,0.7)' : v >= 3 ? 'rgba(245,158,11,0.65)' : 'rgba(34,197,94,0.6)';
+  });
+  transitChartRef.update('none');
 }
 
 // Transit chart init — waits for Chart.js to be ready
@@ -1922,23 +1984,23 @@ function initTransitChart() {
   }
   try {
     const transitCtx = document.getElementById('transitChart').getContext('2d');
-    new Chart(transitCtx, {
+    transitChartRef = new Chart(transitCtx, {
       type: 'bar',
       data: {
         labels: transitDays,
         datasets: [
           {
-            label: 'Daily Transits',
+            label: 'Reported Transit Attempts',
             data: transitCounts,
             backgroundColor: transitCounts.map(v =>
-              v > 50 ? 'rgba(34,197,94,0.6)' :
-              v > 20 ? 'rgba(245,158,11,0.6)' :
-              'rgba(239,68,68,0.6)'
+              v >= 6 ? 'rgba(239,68,68,0.7)' :
+              v >= 3 ? 'rgba(245,158,11,0.65)' :
+              'rgba(34,197,94,0.6)'
             ),
             borderRadius: 3,
           },
           {
-            label: 'Historical Avg (85/day)',
+            label: 'Baseline reference (8/day)',
             data: transitBaseline,
             type: 'line',
             borderColor: 'rgba(100,116,139,0.5)',
@@ -1969,6 +2031,7 @@ function initTransitChart() {
         }
       }
     });
+    updateTransitChartFromRealAttempts();
     console.log('[TRANSIT] Chart rendered successfully');
   } catch(e) {
     console.warn('[TRANSIT] Chart failed:', e.message);
@@ -3583,7 +3646,9 @@ async function fetchNewsTicker() {
       return true;
     });
 
-    renderNewsItems(allItems.slice(0, 60), ticker, countEl);
+    var trimmedItems = allItems.slice(0, 60);
+    renderNewsItems(trimmedItems, ticker, countEl);
+    mergeTransitAttempts(trimmedItems);
     if (hasNewItems && newsLastId > 0) console.log('[NEWS] New items detected (newest id: ' + newestId + ')');
     return;
   }
@@ -3596,7 +3661,9 @@ async function fetchNewsTicker() {
   var rssItems = await fetchRSSNewsFallback();
   var merged = suppItems.concat(rssItems);
   merged.sort(function(a, b) { return b.ts - a.ts; });
-  renderNewsItems(merged.slice(0, 60), ticker, countEl);
+  var trimmedMerged = merged.slice(0, 60);
+  renderNewsItems(trimmedMerged, ticker, countEl);
+  mergeTransitAttempts(trimmedMerged);
   console.log('[NEWS] Fallback loaded', merged.length, 'items');
 }
 
@@ -3635,6 +3702,8 @@ async function refreshAll() {
   btn.disabled = false;
 }
 
+var refreshInFlight = false;
+
 // =====================
 // INIT
 // =====================
@@ -3662,10 +3731,13 @@ async function refreshMedium() {
 }
 
 // Countdown timer display
-let refreshCountdown = 300;
+const FULL_REFRESH_MS = 180000;
+const FAST_REFRESH_MS = 30000;
+const MEDIUM_REFRESH_MS = 120000;
+let refreshCountdown = Math.floor(FULL_REFRESH_MS / 1000);
 function updateRefreshTimer() {
   refreshCountdown--;
-  if (refreshCountdown <= 0) refreshCountdown = 300;
+  if (refreshCountdown <= 0) refreshCountdown = Math.floor(FULL_REFRESH_MS / 1000);
   const m = Math.floor(refreshCountdown / 60);
   const s = refreshCountdown % 60;
   const timeStr = m + ':' + String(s).padStart(2, '0');
@@ -3691,11 +3763,16 @@ var lastSuccessfulRefresh = 0;
 var consecutiveFailures = 0;
 
 async function refreshAllWithRetry() {
+  if (refreshInFlight) {
+    console.log('[REFRESH] Skip — refresh already in flight');
+    return;
+  }
+  refreshInFlight = true;
   try {
     await refreshAll();
     lastSuccessfulRefresh = Date.now();
     consecutiveFailures = 0;
-    refreshCountdown = 300;
+    refreshCountdown = Math.floor(FULL_REFRESH_MS / 1000);
   } catch(e) {
     consecutiveFailures++;
     console.error('[REFRESH] Failure #' + consecutiveFailures + ':', e.message);
@@ -3704,6 +3781,8 @@ async function refreshAllWithRetry() {
       console.log('[REFRESH] Auto-retry in 30s...');
       setTimeout(function() { refreshAllWithRetry(); }, 30000);
     }
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -3727,21 +3806,21 @@ function startDashboard() {
   });
 
   // ===== REFRESH SCHEDULE (NO GAPS > 5 MIN) =====
-  // Every 60s:  Prices (ticker + Hyperliquid) + whales + fair value + supply SPR timer
-  // Every 120s: News feed (StockLabs-style RSS)
-  // Every 150s: Sentiment headlines + prediction markets
-  // Every 300s: FULL refresh (all 7 fetchers + charts + renders)
+  // Every 30s:  Prices (ticker + Hyperliquid) + whales + fair value + supply SPR timer
+  // Every 20s: News feed (StockLabs-style RSS)
+  // Every 120s: Sentiment headlines + prediction markets
+  // Every 180s: FULL refresh (all 7 fetchers + charts + renders)
   // Every 60s:  Health watchdog check
 
-  // Full refresh every 5 minutes
-  setInterval(function() { refreshAllWithRetry(); }, 300000);
+  // Full refresh every 3 minutes
+  setInterval(function() { refreshAllWithRetry(); }, FULL_REFRESH_MS);
 
-  // Fast price refresh every 60 seconds (prices + whales + fair value + supply)
-  setInterval(refreshPricesOnly, 60000);
+  // Fast price refresh every 30 seconds (prices + whales + fair value + supply)
+  setInterval(refreshPricesOnly, FAST_REFRESH_MS);
 
-  // Medium refresh every 2.5 minutes (sentiment + predictions — staggered from full)
+  // Medium refresh every 2 minutes (sentiment + predictions — staggered from full)
   setTimeout(function() {
-    setInterval(refreshMedium, 150000);
+    setInterval(refreshMedium, MEDIUM_REFRESH_MS);
   }, 75000); // offset by 75s to stagger from full refresh
 
   // News feed refreshes on its own every 120s (set in fetchNewsTicker section)
