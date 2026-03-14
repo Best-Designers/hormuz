@@ -2246,12 +2246,46 @@ const POLYMARKET_EVENTS = [
   { slug: 'will-iran-close-the-strait-of-hormuz-by-2027', label: 'Iran closes Strait of Hormuz?', filter: /Hormuz.*March|Hormuz.*before 2027/i },
   { slug: 'us-x-iran-ceasefire-by', label: 'US-Iran ceasefire?', filter: /ceasefire.*March|ceasefire.*April/i },
   { slug: 'iran-strikes-israel-on', label: 'Iran strikes Israel?', filter: /strikes.*March|strikes.*April/i },
-  { slug: 'us-forces-enter-iran-by', label: 'US forces enter Iran?', filter: /enter.*April|enter.*June/i },
+  {
+    slug: 'us-forces-enter-iran-by',
+    label: 'US ground troops enter Iran?',
+    filters: [
+      /ground troops|forces.*enter.*April|invade.*April/i,
+      /ground troops|forces.*enter.*June|invade.*June/i,
+      /ground troops|forces.*enter.*September|invade.*September/i,
+      /ground troops|forces.*enter.*December|invade.*December|invade.*2026/i,
+    ],
+    maxMarkets: 4,
+  },
   { slug: 'iran-x-israelus-conflict-ends-by', label: 'Iran conflict ends?', filter: /ends.*April|ends.*June/i },
   { slug: 'iran-leadership-change-by', label: 'Iran leadership change?', filter: /leadership.*2026|leadership.*June/i },
-  { slug: 'will-crude-oil-cl-hit-by-end-of-march', label: 'Crude Oil price target?', filter: /\$100|\$110|\$120|hit.*\d+.*March/i },
-  { slug: 'what-will-crude-oil-cl-settle-at-in-march', label: 'CL March settlement?', filter: /settle|above.*\$|range/i },
+  {
+    slug: 'will-crude-oil-cl-hit-by-end-of-march',
+    label: 'Crude Oil price targets?',
+    filters: [/\$90|hit.*90/i, /\$100|hit.*100/i, /\$110|hit.*110/i, /\$120|hit.*120/i],
+    maxMarkets: 4,
+  },
+  {
+    slug: 'what-will-crude-oil-cl-settle-at-in-march',
+    label: 'CL settlement bands?',
+    filters: [/below|under.*\$/i, /\$70|\$80/i, /\$90|\$100/i, /above|over.*\$/i],
+    maxMarkets: 4,
+  },
 ];
+
+function parseOutcomePrices(raw) {
+  if (Array.isArray(raw)) return raw.map(Number).filter(Number.isFinite);
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(Number).filter(Number.isFinite);
+    } catch (e) {
+      const match = raw.match(/[0-9]*\.?[0-9]+/g) || [];
+      return match.map(Number).filter(Number.isFinite);
+    }
+  }
+  return [];
+}
 
 function renderPredictions(markets) {
   const grid = document.getElementById('predictions-grid');
@@ -2279,22 +2313,41 @@ async function fetchPredictionMarkets() {
   const allMarkets = [];
   for (const ev of POLYMARKET_EVENTS) {
     try {
-      const url = `https://api.codetabs.com/v1/proxy?quest=https://gamma-api.polymarket.com/events?slug=${ev.slug}`;
-      const resp = await fetchWithTimeout(url, {}, 10000);
+      const targetUrl = `https://gamma-api.polymarket.com/events?slug=${ev.slug}`;
+      const resp = await fetchViaProxy(targetUrl, {}, 10000);
       if (resp.ok) {
         const data = await resp.json();
         if (data.length > 0 && data[0].markets) {
-          const active = data[0].markets.filter(m => m.active && !m.closed && m.outcomePrices);
+          const active = data[0].markets.filter(m => m.active && !m.closed && m.outcomePrices && !m.archived);
           if (active.length > 0) {
-            // For oil price events with multiple price levels, pick highest-volume market
-            if (ev.slug.includes('crude-oil')) {
-              const sorted = active.sort((a, b) => parseFloat(b.volume || 0) - parseFloat(a.volume || 0));
-              const pick = sorted.find(m => ev.filter.test(m.question)) || sorted[0];
-              const prices = JSON.parse(pick.outcomePrices);
-              allMarkets.push({ question: pick.question, prob: parseFloat(prices[0]), slug: ev.slug, volume: pick.volume });
+            const sorted = active
+              .slice()
+              .sort((a, b) => parseFloat(b.volume || 0) - parseFloat(a.volume || 0));
+
+            if (Array.isArray(ev.filters) && ev.filters.length > 0) {
+              const usedQuestions = new Set();
+              for (const f of ev.filters) {
+                const pick = sorted.find(m => !usedQuestions.has(m.question) && f.test(m.question)) || null;
+                if (!pick) continue;
+                const prices = parseOutcomePrices(pick.outcomePrices);
+                if (!prices.length) continue;
+                usedQuestions.add(pick.question);
+                allMarkets.push({ question: pick.question, prob: parseFloat(prices[0]), slug: ev.slug, volume: pick.volume });
+                if (ev.maxMarkets && usedQuestions.size >= ev.maxMarkets) break;
+              }
+
+              if (!usedQuestions.size) {
+                const topPicks = sorted.slice(0, ev.maxMarkets || 1);
+                for (const pick of topPicks) {
+                  const prices = parseOutcomePrices(pick.outcomePrices);
+                  if (!prices.length) continue;
+                  allMarkets.push({ question: pick.question, prob: parseFloat(prices[0]), slug: ev.slug, volume: pick.volume });
+                }
+              }
             } else {
-              let pick = active.find(m => ev.filter.test(m.question)) || active[0];
-              const prices = JSON.parse(pick.outcomePrices);
+              const pick = sorted.find(m => ev.filter && ev.filter.test(m.question)) || sorted[0];
+              const prices = parseOutcomePrices(pick.outcomePrices);
+              if (!prices.length) continue;
               allMarkets.push({ question: pick.question, prob: parseFloat(prices[0]), slug: ev.slug, volume: pick.volume });
             }
           }
